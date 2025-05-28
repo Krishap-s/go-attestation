@@ -112,6 +112,10 @@ func (t *trousersTPM) newKey(*AK, *KeyConfig) (*Key, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
+func (t *trousersTPM) newKeyCertifiedByKey(ck certifyingKey, opts *KeyConfig) (*Key, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
 func (t *trousersTPM) loadKey(opaqueBlob []byte) (*Key, error) {
 	return nil, fmt.Errorf("not implemented")
 }
@@ -157,6 +161,10 @@ func allPCRs12(ctx *tspi.Context) (map[uint32][]byte, error) {
 		PCRs[(uint32)(i)] = PCRlist[i]
 	}
 	return PCRs, nil
+}
+
+func (t *trousersTPM) pcrbanks() ([]HashAlg, error) {
+	return []HashAlg{HashSHA1}, nil
 }
 
 func (t *trousersTPM) pcrs(alg HashAlg) ([]PCR, error) {

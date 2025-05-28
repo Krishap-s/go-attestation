@@ -38,6 +38,12 @@ type wrappedTPM20 struct {
 	tpmECCEkTemplate *tpm2.Public
 }
 
+// certifyingKey contains details of a TPM key that could certify other keys.
+type certifyingKey struct {
+	handle tpmutil.Handle
+	alg    Algorithm
+}
+
 func (t *wrappedTPM20) rsaEkTemplate() tpm2.Public {
 	if t.tpmRSAEkTemplate != nil {
 		return *t.tpmRSAEkTemplate
@@ -215,7 +221,7 @@ func (t *wrappedTPM20) eks() ([]EK, error) {
 
 	i, err := t.info()
 	if err != nil {
-		return nil, fmt.Errorf("Retrieving TPM info failed: %v", err)
+		return nil, fmt.Errorf("retrieving TPM info failed: %v", err)
 	}
 	ekPub := &rsa.PublicKey{
 		E: int(pub.RSAParameters.Exponent()),
@@ -249,6 +255,16 @@ func (t *wrappedTPM20) newAK(opts *AKConfig) (*AK, error) {
 		return nil, fmt.Errorf("failed to get SRK handle: %v", err)
 	}
 
+	var akTemplate tpm2.Public
+	var sigScheme *tpm2.SigScheme
+	// The default is RSA.
+	if opts != nil && opts.Algorithm == ECDSA {
+		akTemplate = akTemplateECC
+		sigScheme = akTemplateECC.ECCParameters.Sign
+	} else {
+		akTemplate = akTemplateRSA
+		sigScheme = akTemplateRSA.RSAParameters.Sign
+	}
 	blob, pub, creationData, creationHash, tix, err := tpm2.CreateKey(t.rwc, srk, tpm2.PCRSelection{}, "", "", akTemplate)
 	if err != nil {
 		return nil, fmt.Errorf("CreateKeyEx() failed: %v", err)
@@ -265,7 +281,7 @@ func (t *wrappedTPM20) newAK(opts *AKConfig) (*AK, error) {
 	}()
 
 	// We can only certify the creation immediately afterwards, so we cache the result.
-	attestation, sig, err := tpm2.CertifyCreation(t.rwc, "", keyHandle, keyHandle, nil, creationHash, tpm2.SigScheme{Alg: tpm2.AlgRSASSA, Hash: tpm2.AlgSHA256, Count: 0}, tix)
+	attestation, sig, err := tpm2.CertifyCreation(t.rwc, "", keyHandle, keyHandle, nil, creationHash, *sigScheme, tix)
 	if err != nil {
 		return nil, fmt.Errorf("CertifyCreation failed: %v", err)
 	}
@@ -278,6 +294,15 @@ func (t *wrappedTPM20) newKey(ak *AK, opts *KeyConfig) (*Key, error) {
 		return nil, fmt.Errorf("expected *wrappedKey20, got: %T", k)
 	}
 
+	kAlg, err := k.algorithm()
+	if err != nil {
+		return nil, fmt.Errorf("get algorithm: %v", err)
+	}
+	ck := certifyingKey{handle: k.hnd, alg: kAlg}
+	return t.newKeyCertifiedByKey(ck, opts)
+}
+
+func (t *wrappedTPM20) newKeyCertifiedByKey(ck certifyingKey, opts *KeyConfig) (*Key, error) {
 	parent, blob, pub, creationData, err := createKey(t, opts)
 	if err != nil {
 		return nil, fmt.Errorf("cannot create key: %v", err)
@@ -295,9 +320,10 @@ func (t *wrappedTPM20) newKey(ak *AK, opts *KeyConfig) (*Key, error) {
 	}()
 
 	// Certify application key by AK
-	cp, err := k.certify(t, keyHandle)
+	certifyOpts := CertifyOpts{QualifyingData: opts.QualifyingData}
+	cp, err := certifyByKey(t, keyHandle, ck, certifyOpts)
 	if err != nil {
-		return nil, fmt.Errorf("ak.Certify() failed: %v", err)
+		return nil, fmt.Errorf("certifyByKey() failed: %v", err)
 	}
 	if !bytes.Equal(pub, cp.Public) {
 		return nil, fmt.Errorf("certified incorrect key, expected: %v, certified: %v", pub, cp.Public)
@@ -439,6 +465,10 @@ func (t *wrappedTPM20) loadKeyWithParent(opaqueBlob []byte, parent ParentKeyConf
 	return &Key{key: newWrappedKey20(hnd, sKey.Blob, sKey.Public, sKey.CreateData, sKey.CreateAttestation, sKey.CreateSignature), pub: pub, tpm: t}, nil
 }
 
+func (t *wrappedTPM20) pcrbanks() ([]HashAlg, error) {
+	return pcrbanks(t.rwc)
+}
+
 func (t *wrappedTPM20) pcrs(alg HashAlg) ([]PCR, error) {
 	PCRs, err := readAllPCRs20(t.rwc, alg.goTPMAlg())
 	if err != nil {
@@ -559,7 +589,36 @@ func (k *wrappedKey20) activateCredential(tb tpmBase, in EncryptedCredential, ek
 	}, k.hnd, ekHnd, credential, secret)
 }
 
-func (k *wrappedKey20) certify(tb tpmBase, handle interface{}) (*CertificationParameters, error) {
+func sigSchemeFromAlgorithm(alg Algorithm) (tpm2.SigScheme, error) {
+	switch alg {
+	case RSA:
+		return tpm2.SigScheme{
+			Alg:  tpm2.AlgRSASSA,
+			Hash: tpm2.AlgSHA256,
+		}, nil
+	case ECDSA:
+		return tpm2.SigScheme{
+			Alg:  tpm2.AlgECDSA,
+			Hash: tpm2.AlgSHA256,
+		}, nil
+	default:
+		return tpm2.SigScheme{}, fmt.Errorf("algorithm %v not supported", alg)
+	}
+}
+
+func (k *wrappedKey20) certify(tb tpmBase, handle interface{}, opts CertifyOpts) (*CertificationParameters, error) {
+	kAlg, err := k.algorithm()
+	if err != nil {
+		return nil, fmt.Errorf("unknown algorithm: %v", err)
+	}
+	ck := certifyingKey{
+		handle: k.hnd,
+		alg:    kAlg,
+	}
+	return certifyByKey(tb, handle, ck, opts)
+}
+
+func certifyByKey(tb tpmBase, handle interface{}, ck certifyingKey, opts CertifyOpts) (*CertificationParameters, error) {
 	t, ok := tb.(*wrappedTPM20)
 	if !ok {
 		return nil, fmt.Errorf("expected *wrappedTPM20, got %T", tb)
@@ -568,11 +627,11 @@ func (k *wrappedKey20) certify(tb tpmBase, handle interface{}) (*CertificationPa
 	if !ok {
 		return nil, fmt.Errorf("expected tpmutil.Handle, got %T", handle)
 	}
-	scheme := tpm2.SigScheme{
-		Alg:  tpm2.AlgRSASSA,
-		Hash: tpm2.AlgSHA256,
+	scheme, err := sigSchemeFromAlgorithm(ck.alg)
+	if err != nil {
+		return nil, fmt.Errorf("get signature scheme: %v", err)
 	}
-	return certify(t.rwc, hnd, k.hnd, scheme)
+	return certify(t.rwc, hnd, ck.handle, opts.QualifyingData, scheme)
 }
 
 func (k *wrappedKey20) quote(tb tpmBase, nonce []byte, alg HashAlg, selectedPCRs []int) (*Quote, error) {
@@ -677,4 +736,19 @@ func (k *wrappedKey20) decrypt(tb tpmBase, ctxt []byte) ([]byte, error) {
 
 func (k *wrappedKey20) blobs() ([]byte, []byte, error) {
 	return k.public, k.blob, nil
+}
+
+func (k *wrappedKey20) algorithm() (Algorithm, error) {
+	tpmPub, err := tpm2.DecodePublic(k.public)
+	if err != nil {
+		return "", fmt.Errorf("decode public key: %v", err)
+	}
+	switch tpmPub.Type {
+	case tpm2.AlgRSA:
+		return RSA, nil
+	case tpm2.AlgECC:
+		return ECDSA, nil
+	default:
+		return "", fmt.Errorf("unsupported key type: %v", tpmPub.Type)
+	}
 }

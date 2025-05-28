@@ -89,6 +89,8 @@ func ParseSubjectAltName(ext pkix.Extension) (*SubjectAltName, error) {
 				return nil, fmt.Errorf("parsePermanentIdentifier: %v", err)
 			}
 			out.PermanentIdentifiers = append(out.PermanentIdentifiers, permID)
+		} else {
+			return nil, fmt.Errorf("expected type id %v, got %v", oidPermanentIdentifier, otherName.TypeID)
 		}
 	}
 	return &out, nil
@@ -149,8 +151,9 @@ func forEachSAN(extension []byte, callback func(ext asn1.RawValue) error) error 
 	return nil
 }
 
-// MarshalSubjectAltName converts a SubjectAltName struct into a pkix.Extension.
-func MarshalSubjectAltName(san *SubjectAltName) (pkix.Extension, error) {
+// MarshalSubjectAltName converts a SubjectAltName struct into a pkix.Extension,
+// allowing callers to specify if the extension is critical.
+func MarshalSubjectAltName(san *SubjectAltName, critical bool) (pkix.Extension, error) {
 	var generalNames []asn1.RawValue
 	for _, permID := range san.PermanentIdentifiers {
 		val, err := marshalOtherName(oidPermanentIdentifier, permID)
@@ -171,7 +174,8 @@ func MarshalSubjectAltName(san *SubjectAltName) (pkix.Extension, error) {
 		return pkix.Extension{}, err
 	}
 	return pkix.Extension{
-		Id:    oid.SubjectAltName,
-		Value: val,
+		Id:       oid.SubjectAltName,
+		Critical: critical,
+		Value:    val,
 	}, nil
 }

@@ -37,6 +37,7 @@ var (
 	oidSignatureRSASha1   = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 5}
 	oidSignatureRSAPSS    = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 10}
 	oidSignatureRSASha256 = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 11}
+	oidSignatureRSASha384 = asn1.ObjectIdentifier{1, 2, 840, 113549, 1, 1, 12}
 	oidSignatureEd25519   = asn1.ObjectIdentifier{1, 3, 101, 112}
 
 	oidSHA256 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 2, 1}
@@ -55,6 +56,7 @@ var signatureAlgorithmDetails = []struct {
 }{
 	{x509.SHA1WithRSA, "SHA1-RSA", oidSignatureRSASha1, x509.RSA, crypto.SHA1},
 	{x509.SHA256WithRSA, "SHA256-RSA", oidSignatureRSASha256, x509.RSA, crypto.SHA256},
+	{x509.SHA384WithRSA, "SHA384-RSA", oidSignatureRSASha384, x509.RSA, crypto.SHA384},
 	{x509.SHA256WithRSAPSS, "SHA256-RSAPSS", oidSignatureRSAPSS, x509.RSA, crypto.SHA256},
 	{x509.SHA384WithRSAPSS, "SHA384-RSAPSS", oidSignatureRSAPSS, x509.RSA, crypto.SHA384},
 	{x509.SHA512WithRSAPSS, "SHA512-RSAPSS", oidSignatureRSAPSS, x509.RSA, crypto.SHA512},
@@ -445,13 +447,14 @@ type PlatformConfigurationV1 struct {
 }
 
 func unmarshalSAN(v asn1.RawValue) ([]pkix.AttributeTypeAndValue, error) {
-	if v.Tag == asn1.TagSet {
+	switch v.Tag {
+	case asn1.TagSet:
 		var e pkix.AttributeTypeAndValue
 		if _, err := asn1.Unmarshal(v.Bytes, &e); err != nil {
 			return nil, err
 		}
 		return []pkix.AttributeTypeAndValue{e}, nil
-	} else if v.Tag == asn1.TagOctetString {
+	case asn1.TagOctetString:
 		var attributes []pkix.AttributeTypeAndValue
 		var platformData PlatformDataSequence
 		rest, err := asn1.Unmarshal(v.Bytes, &platformData)
@@ -466,8 +469,9 @@ func unmarshalSAN(v asn1.RawValue) ([]pkix.AttributeTypeAndValue, error) {
 			}
 		}
 		return attributes, nil
+	default:
+		return nil, fmt.Errorf("attributecert: unexpected SAN type %v", v.Tag)
 	}
-	return nil, fmt.Errorf("attributecert: unexpected SAN type %v", v.Tag)
 }
 
 func parseAttributeCertificate(in *attributeCertificate) (*AttributeCertificate, error) {

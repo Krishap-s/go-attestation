@@ -290,13 +290,26 @@ func decryptCredential(secretKey, blob []byte) ([]byte, error) {
 }
 
 func (t *windowsTPM) newAK(opts *AKConfig) (*AK, error) {
-	nameHex := make([]byte, 5)
-	if n, err := rand.Read(nameHex); err != nil || n != len(nameHex) {
-		return nil, fmt.Errorf("rand.Read() failed with %d/%d bytes read and error: %v", n, len(nameHex), err)
-	}
-	name := fmt.Sprintf("ak-%x", nameHex)
+	var name string
+	var alg Algorithm
 
-	kh, err := t.pcp.NewAK(name)
+	if opts != nil && opts.Name != "" {
+		name = opts.Name
+	} else {
+		nameHex := make([]byte, 5)
+		if n, err := rand.Read(nameHex); err != nil || n != len(nameHex) {
+			return nil, fmt.Errorf("rand.Read() failed with %d/%d bytes read and error: %v", n, len(nameHex), err)
+		}
+		name = fmt.Sprintf("ak-%x", nameHex)
+	}
+	if opts != nil && opts.Algorithm != "" {
+		alg = opts.Algorithm
+	} else {
+		// Default to RSA based AK.
+		alg = RSA
+	}
+
+	kh, err := t.pcp.NewAK(name, alg)
 	if err != nil {
 		return nil, fmt.Errorf("pcp failed to mint attestation key: %v", err)
 	}
@@ -348,6 +361,10 @@ func (t *windowsTPM) newKey(*AK, *KeyConfig) (*Key, error) {
 	return nil, fmt.Errorf("not implemented")
 }
 
+func (t *windowsTPM) newKeyCertifiedByKey(ck certifyingKey, opts *KeyConfig) (*Key, error) {
+	return nil, fmt.Errorf("not implemented")
+}
+
 func (t *windowsTPM) loadKey(opaqueBlob []byte) (*Key, error) {
 	return nil, fmt.Errorf("not implemented")
 }
@@ -373,6 +390,23 @@ func allPCRs12(tpm io.ReadWriter) (map[uint32][]byte, error) {
 	}
 
 	return out, nil
+}
+
+func (t *windowsTPM) pcrbanks() ([]HashAlg, error) {
+	switch t.version {
+	case TPMVersion12:
+		return []HashAlg{HashSHA1}, nil
+
+	case TPMVersion20:
+		tpm, err := t.pcp.TPMCommandInterface()
+		if err != nil {
+			return nil, fmt.Errorf("TPMCommandInterface() failed: %v", err)
+		}
+		return pcrbanks(tpm)
+
+	default:
+		return nil, fmt.Errorf("unsupported TPM version: %x", t.version)
+	}
 }
 
 func (t *windowsTPM) pcrs(alg HashAlg) ([]PCR, error) {

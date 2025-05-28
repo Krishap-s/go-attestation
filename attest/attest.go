@@ -117,7 +117,7 @@ type ak interface {
 	activateCredential(tpm tpmBase, in EncryptedCredential, ek *EK) ([]byte, error)
 	quote(t tpmBase, nonce []byte, alg HashAlg, selectedPCRs []int) (*Quote, error)
 	attestationParameters() AttestationParameters
-	certify(tb tpmBase, handle interface{}) (*CertificationParameters, error)
+	certify(tb tpmBase, handle interface{}, opts CertifyOpts) (*CertificationParameters, error)
 }
 
 // AK represents a key which can be used for attestation.
@@ -147,7 +147,7 @@ func (k *AK) ActivateCredential(tpm *TPM, in EncryptedCredential) (secret []byte
 	return k.ak.activateCredential(tpm.tpm, in, nil)
 }
 
-// ActivateCredential decrypts the secret using the key to prove that the AK
+// ActivateCredentialWithEK decrypts the secret using the key to prove that the AK
 // was generated on the same TPM as the EK. This method can be used with TPMs
 // that have an ECC EK. The 'ek' argument must be one of EKs returned from
 // TPM.EKs() or TPM.EKCertificates().
@@ -185,15 +185,20 @@ func (k *AK) AttestationParameters() AttestationParameters {
 // key. Depending on the actual instantiation it can accept different handle
 // types (e.g., tpmutil.Handle on Linux or uintptr on Windows).
 func (k *AK) Certify(tpm *TPM, handle interface{}) (*CertificationParameters, error) {
-	return k.ak.certify(tpm.tpm, handle)
+	return k.ak.certify(tpm.tpm, handle, CertifyOpts{})
 }
 
 // AKConfig encapsulates parameters for minting keys.
 type AKConfig struct {
+	// Optionally set unique name for AK on Windows.
+	Name string
 	// Parent describes the Storage Root Key that will be used as a parent.
 	// If nil, the default SRK (i.e. RSA with handle 0x81000001) is assumed.
 	// Supported only by TPM 2.0 on Linux.
 	Parent *ParentKeyConfig
+
+	// If not specified, the default algorithm (RSA) is assumed.
+	Algorithm Algorithm
 }
 
 // EncryptedCredential represents encrypted parameters which must be activated
@@ -396,41 +401,30 @@ func (a *AKPublic) VerifyAll(quotes []Quote, pcrs []PCR, nonce []byte) error {
 // HashAlg identifies a hashing Algorithm.
 type HashAlg uint8
 
-// Valid hash algorithms.
+// Known valid hash algorithms.
 var (
 	HashSHA1   = HashAlg(tpm2.AlgSHA1)
 	HashSHA256 = HashAlg(tpm2.AlgSHA256)
+	HashSHA384 = HashAlg(tpm2.AlgSHA384)
+	HashSHA512 = HashAlg(tpm2.AlgSHA512)
 )
 
 func (a HashAlg) cryptoHash() crypto.Hash {
-	switch a {
-	case HashSHA1:
-		return crypto.SHA1
-	case HashSHA256:
-		return crypto.SHA256
+	g := a.goTPMAlg()
+	h, err := g.Hash()
+	if err != nil {
+		panic(fmt.Sprintf("HashAlg %v (corresponding to TPM2.Algorithm %v) has no corresponding crypto.Hash", a, g))
 	}
-	return 0
+	return h
 }
 
 func (a HashAlg) goTPMAlg() tpm2.Algorithm {
-	switch a {
-	case HashSHA1:
-		return tpm2.AlgSHA1
-	case HashSHA256:
-		return tpm2.AlgSHA256
-	}
-	return 0
+	return tpm2.Algorithm(a)
 }
 
 // String returns a human-friendly representation of the hash algorithm.
 func (a HashAlg) String() string {
-	switch a {
-	case HashSHA1:
-		return "SHA1"
-	case HashSHA256:
-		return "SHA256"
-	}
-	return fmt.Sprintf("HashAlg<%d>", int(a))
+	return a.goTPMAlg().String()
 }
 
 // PlatformParameters encapsulates the set of information necessary to attest

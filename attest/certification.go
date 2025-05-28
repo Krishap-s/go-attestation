@@ -17,6 +17,7 @@ package attest
 import (
 	"bytes"
 	"crypto"
+	"crypto/ecdsa"
 	"crypto/rand"
 	"crypto/rsa"
 	"errors"
@@ -80,6 +81,12 @@ type ActivateOpts struct {
 	// key used in VerifyOpts.Public.
 	// Use tpm2.Public.Name() to produce the digest for a provided key.
 	VerifierKeyNameDigest *tpm2.HashValue
+}
+
+// CertifyOpts specifies options for the key's certification.
+type CertifyOpts struct {
+	// QualifyingData is the user provided qualifying data.
+	QualifyingData []byte
 }
 
 // NewActivateOpts creates options for use in generating an activation challenge for a certified key.
@@ -164,11 +171,6 @@ func (p *CertificationParameters) Verify(opts VerifyOpts) error {
 	}
 
 	// Check the signature over the attestation data verifies correctly.
-	// TODO: Support ECC certifying keys
-	pk, ok := opts.Public.(*rsa.PublicKey)
-	if !ok {
-		return fmt.Errorf("only RSA verification keys are supported")
-	}
 	if !opts.Hash.Available() {
 		return fmt.Errorf("hash function is unavailable")
 	}
@@ -184,8 +186,17 @@ func (p *CertificationParameters) Verify(opts VerifyOpts) error {
 		return fmt.Errorf("DecodeSignature() failed: %v", err)
 	}
 
-	if err := rsa.VerifyPKCS1v15(pk, opts.Hash, hsh.Sum(nil), sig.RSA.Signature); err != nil {
-		return fmt.Errorf("could not verify attestation: %v", err)
+	switch pk := opts.Public.(type) {
+	case *rsa.PublicKey:
+		if err := rsa.VerifyPKCS1v15(pk, opts.Hash, hsh.Sum(nil), sig.RSA.Signature); err != nil {
+			return fmt.Errorf("could not verify attestation: %v", err)
+		}
+	case *ecdsa.PublicKey:
+		if ok := ecdsa.Verify(pk, hsh.Sum(nil), sig.ECC.R, sig.ECC.S); !ok {
+			return fmt.Errorf("could not verify ECC attestation")
+		}
+	default:
+		return fmt.Errorf("unsupported public key type: %T", pub)
 	}
 
 	return nil
@@ -236,9 +247,9 @@ func (p *CertificationParameters) Generate(rnd io.Reader, verifyOpts VerifyOpts,
 	}, nil
 }
 
-// certify uses AK's handle and the passed signature scheme to certify the key
-// with the `hnd` handle.
-func certify(tpm io.ReadWriteCloser, hnd, akHnd tpmutil.Handle, scheme tpm2.SigScheme) (*CertificationParameters, error) {
+// certify uses AK's handle, the passed user qualifying data, and the passed
+// signature scheme to certify the key with the `hnd` handle.
+func certify(tpm io.ReadWriteCloser, hnd, akHnd tpmutil.Handle, qualifyingData []byte, scheme tpm2.SigScheme) (*CertificationParameters, error) {
 	pub, _, _, err := tpm2.ReadPublic(tpm, hnd)
 	if err != nil {
 		return nil, fmt.Errorf("tpm2.ReadPublic() failed: %v", err)
@@ -247,7 +258,7 @@ func certify(tpm io.ReadWriteCloser, hnd, akHnd tpmutil.Handle, scheme tpm2.SigS
 	if err != nil {
 		return nil, fmt.Errorf("could not encode public key: %v", err)
 	}
-	att, sig, err := tpm2.CertifyEx(tpm, "", "", hnd, akHnd, nil, scheme)
+	att, sig, err := tpm2.CertifyEx(tpm, "", "", hnd, akHnd, qualifyingData, scheme)
 	if err != nil {
 		return nil, fmt.Errorf("tpm2.Certify() failed: %v", err)
 	}
